@@ -2,8 +2,8 @@ import sys
 import numpy as np
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QPushButton, QLabel, QSpinBox, QDoubleSpinBox, QSlider,
-    QGraphicsView, QGraphicsScene, QGraphicsRectItem, QCheckBox,
+    QPushButton, QLabel, QSpinBox, QDoubleSpinBox, QSlider, QComboBox,
+    QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsEllipseItem, QCheckBox,
     QMessageBox, QSizePolicy, QSpacerItem, QFrame, QStatusBar
 )
 from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, QObject, pyqtSignal, pyqtSlot
@@ -45,7 +45,7 @@ class PatternCanvas(QGraphicsView):
     scale_changed_signal = pyqtSignal(float) # To update zoom slider
 
     MIN_ZOOM_SCALE = 0.1
-    MAX_ZOOM_SCALE = 5.0 # Increased max zoom for flexibility
+    MAX_ZOOM_SCALE = 10.0 # User feedback indicated previous version ran, likely with 10.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -54,12 +54,14 @@ class PatternCanvas(QGraphicsView):
         self.setScene(self.scene)
 
         self.numpy_pattern = np.zeros((DMD_HEIGHT, DMD_WIDTH), dtype=np.uint8)
-        self.active_regions_items = [] 
+        self.active_regions_items = []
 
-        self.region_width = DEFAULT_REGION_SIZE
-        self.region_height = DEFAULT_REGION_SIZE
+        # Shape drawing parameters
+        self.current_shape_mode = "Square" # Default shape
+        self.current_shape_size = DEFAULT_REGION_SIZE # Side for square, diameter for circle
+
         self.show_grid = False
-        self.base_grid_spacing = DEFAULT_GRID_SPACING # User-defined spacing at 1x zoom
+        self.base_grid_spacing = DEFAULT_GRID_SPACING
         self.grid_pen = QPen(QColor(Qt.GlobalColor.darkGray), 0.5, Qt.PenStyle.SolidLine)
         self.grid_label_pen = QPen(QColor(Qt.GlobalColor.lightGray), 1) # Pen for grid labels
         self.dmd_outline_pen = QPen(QColor(Qt.GlobalColor.red), 2, Qt.PenStyle.SolidLine)
@@ -80,12 +82,10 @@ class PatternCanvas(QGraphicsView):
         self.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOn)
         self.setMinimumSize(400, 300)
 
-    def set_region_size(self, width, height):
-        self.region_width = max(1, width)
-        self.region_height = max(1, height)
-
-    # set_base_grid_spacing is removed as the UI control is removed.
-    # self.base_grid_spacing will use DEFAULT_GRID_SPACING.
+    def set_shape_params(self, mode, size):
+        self.current_shape_mode = mode
+        self.current_shape_size = max(1, size)
+        # No direct visual update needed here, happens on next click or pattern modification
 
     def toggle_grid(self, show):
         self.show_grid = show
@@ -98,32 +98,87 @@ class PatternCanvas(QGraphicsView):
         super().mousePressEvent(event)
 
     def _add_active_region(self, center_x, center_y):
-        # Calculate floating point positions for the center
-        rect_x_float = center_x - self.region_width / 2.0
-        rect_y_float = center_y - self.region_height / 2.0
+        size = self.current_shape_size
+        item_to_add = None
 
-        # Create QGraphicsRectItem with integer-rounded coordinates and dimensions for pixel alignment
-        item_x = int(round(rect_x_float))
-        item_y = int(round(rect_y_float))
-        item_w = int(round(self.region_width))
-        item_h = int(round(self.region_height))
-        
-        item = QGraphicsRectItem(item_x, item_y, item_w, item_h)
-        item.setBrush(Qt.GlobalColor.white)
-        item.setPen(QPen(Qt.PenStyle.NoPen)) # No border for the item itself
-        self.scene.addItem(item)
-        self.active_regions_items.append(item)
+        if self.current_shape_mode == "Square":
+            half_size = size / 2.0
+            item_x_float = center_x - half_size
+            item_y_float = center_y - half_size
+            
+            item_x = int(round(item_x_float))
+            item_y = int(round(item_y_float))
+            item_w = int(round(size))
+            item_h = int(round(size))
 
-        # Update NumPy array using the same snapped integer coordinates and dimensions
-        np_x_start = max(0, item_x)
-        np_y_start = max(0, item_y)
-        np_x_end = min(DMD_WIDTH, item_x + item_w)
-        np_y_end = min(DMD_HEIGHT, item_y + item_h)
+            item_to_add = QGraphicsRectItem(item_x, item_y, item_w, item_h)
+            
+            np_x_start = max(0, item_x)
+            np_y_start = max(0, item_y)
+            np_x_end = min(DMD_WIDTH, item_x + item_w)
+            np_y_end = min(DMD_HEIGHT, item_y + item_h)
 
-        if np_x_start < np_x_end and np_y_start < np_y_end:
-            self.numpy_pattern[np_y_start:np_y_end, np_x_start:np_x_end] = 1
-        
-        self.pattern_updated_signal.emit(self.numpy_pattern)
+            if np_x_start < np_x_end and np_y_start < np_y_end:
+                self.numpy_pattern[np_y_start:np_y_end, np_x_start:np_x_end] = 1
+
+        elif self.current_shape_mode == "Circle":
+            # 1. Snap parameters to pixel grid
+            pixel_diameter = max(1, int(round(float(size))))
+            pixel_radius = pixel_diameter / 2.0
+            
+            # Center of the circle, aligned to pixel coordinates (integer)
+            # This means the conceptual center of the circle is at the center of a pixel, or at an intersection of 4 pixels.
+            # Let's use the center of the pixel closest to the click.
+            pixel_center_x = round(center_x) 
+            pixel_center_y = round(center_y) 
+
+            # No single QGraphicsEllipseItem anymore for visual representation.
+            # We will add individual 1x1 QGraphicsRectItems for each pixel.
+            item_to_add = None # Will not be used in the same way for circles.
+            
+            # 2. Rasterize into NumPy array using pixel centers AND add 1x1 pixel rects
+            np_center_x_coord = round(center_x) 
+            np_center_y_coord = round(center_y)
+            pixel_radius_sq = pixel_radius * pixel_radius
+
+            # Determine integer pixel indices for iteration range
+            # Bounding box for iteration:
+            min_iter_x = max(0, int(math.floor(np_center_x_coord - pixel_radius)))
+            max_iter_x = min(DMD_WIDTH, int(math.ceil(np_center_x_coord + pixel_radius)))
+            min_iter_y = max(0, int(math.floor(np_center_y_coord - pixel_radius)))
+            max_iter_y = min(DMD_HEIGHT, int(math.ceil(np_center_y_coord + pixel_radius)))
+
+            for r_idx in range(min_iter_y, max_iter_y):  # Iterate through pixel row indices
+                for c_idx in range(min_iter_x, max_iter_x): # Iterate through pixel column indices
+                    # Calculate distance from the *center* of the current pixel (c_idx + 0.5, r_idx + 0.5)
+                    # to the *pixel-aligned center* of the circle.
+                    dist_sq = ((c_idx + 0.5) - np_center_x_coord)**2 + \
+                              ((r_idx + 0.5) - np_center_y_coord)**2
+                    
+                    if dist_sq <= pixel_radius_sq:
+                        # This pixel's center is within the circle
+                        if 0 <= r_idx < DMD_HEIGHT and 0 <= c_idx < DMD_WIDTH: # Redundant check if iter range is correct, but safe
+                            self.numpy_pattern[r_idx, c_idx] = 1
+                            
+                            # Add a 1x1 QGraphicsRectItem for this pixel
+                            pixel_rect = QGraphicsRectItem(float(c_idx), float(r_idx), 1.0, 1.0)
+                            pixel_rect.setBrush(Qt.GlobalColor.white)
+                            pixel_rect.setPen(QPen(Qt.PenStyle.NoPen)) # No border for individual pixels
+                            self.scene.addItem(pixel_rect)
+                            self.active_regions_items.append(pixel_rect)
+            
+            # Signal update once after all pixels for the circle are processed
+            self.pattern_updated_signal.emit(self.numpy_pattern)
+            # No single 'item_to_add' for circles in this pixelated approach
+            return # Exit early as items are added directly
+
+        # Common logic for Square (and if Circle had a single item, which it doesn't anymore)
+        if item_to_add: # This will only be true for Squares now
+            item_to_add.setBrush(Qt.GlobalColor.white)
+            item_to_add.setPen(QPen(Qt.PenStyle.NoPen))
+            self.scene.addItem(item_to_add)
+            self.active_regions_items.append(item_to_add)
+            self.pattern_updated_signal.emit(self.numpy_pattern) # Square already emitted, but safe
 
     def _update_transform(self):
         if self._is_fitting_in_view: # Avoid transform changes during fitInView
@@ -248,10 +303,10 @@ class PatternCanvas(QGraphicsView):
         visible_scene_rect = self.mapToScene(self.viewport().rect()).boundingRect()
         
         # Label offsets from the lines - these are in scene coordinates now if font is fixed
-        label_offset_x = 5 
+        label_offset_x = 8 
         label_offset_y = 5 
         # Adjust Y offset for X-labels to be further down
-        x_label_y_offset_multiplier = 5 # Increased from 3
+        x_label_y_offset_multiplier = 5
 
         # Vertical lines (X-coordinates)
         x_start_grid = math.floor(visible_scene_rect.left() / spacing) * spacing
@@ -459,10 +514,8 @@ class MainWindow(QMainWindow):
         self.stop_button.setEnabled(dmd_ready and sequence_running) # Or just dmd_ready if stop can be called anytime
         # Other controls can be disabled during sequence running if needed
         self.clear_pattern_button.setEnabled(not sequence_running)
-        self.region_width_spinbox.setEnabled(not sequence_running)
-        self.region_height_spinbox.setEnabled(not sequence_running)
-        # self.grid_spacing_spinbox was removed, so this line is removed:
-        # self.grid_spacing_spinbox.setEnabled(not sequence_running)
+        self.shape_type_combo.setEnabled(not sequence_running)
+        self.shape_size_spinbox.setEnabled(not sequence_running)
         self.show_grid_checkbox.setEnabled(not sequence_running)
         self.on_duration_spinbox.setEnabled(not sequence_running)
         self.off_duration_spinbox.setEnabled(not sequence_running)
@@ -492,20 +545,19 @@ class MainWindow(QMainWindow):
         row = 0
         spatial_layout.addWidget(QLabel("<b>Spatial Pattern Editor</b>"), row, 0, 1, 2, alignment=Qt.AlignmentFlag.AlignCenter); row += 1
         
-        spatial_layout.addWidget(QLabel("Region Width (px):"), row, 0)
-        self.region_width_spinbox = QSpinBox()
-        self.region_width_spinbox.setRange(1, DMD_WIDTH)
-        self.region_width_spinbox.setValue(DEFAULT_REGION_SIZE)
-        spatial_layout.addWidget(self.region_width_spinbox, row, 1); row += 1
+        spatial_layout.addWidget(QLabel("Shape Type:"), row, 0)
+        self.shape_type_combo = QComboBox()
+        self.shape_type_combo.addItems(["Square", "Circle"])
+        spatial_layout.addWidget(self.shape_type_combo, row, 1); row += 1
 
-        spatial_layout.addWidget(QLabel("Region Height (px):"), row, 0)
-        self.region_height_spinbox = QSpinBox()
-        self.region_height_spinbox.setRange(1, DMD_HEIGHT)
-        self.region_height_spinbox.setValue(DEFAULT_REGION_SIZE)
-        spatial_layout.addWidget(self.region_height_spinbox, row, 1); row += 1
+        self.shape_size_label = QLabel("Side Length (px):") # Dynamic label
+        spatial_layout.addWidget(self.shape_size_label, row, 0)
+        self.shape_size_spinbox = QSpinBox() # Replaces region_width_spinbox
+        self.shape_size_spinbox.setRange(1, max(DMD_WIDTH, DMD_HEIGHT))
+        self.shape_size_spinbox.setValue(DEFAULT_REGION_SIZE)
+        spatial_layout.addWidget(self.shape_size_spinbox, row, 1); row += 1
         
-        # Base Grid Spacing UI elements are removed.
-        # self.grid_spacing_spinbox and its label were here.
+        # Region Height spinbox and its label are removed.
 
         self.show_grid_checkbox = QCheckBox("Show Grid")
         self.show_grid_checkbox.setChecked(False)
@@ -614,19 +666,18 @@ class MainWindow(QMainWindow):
 
     def _connect_signals(self):
         # Spatial controls
-        self.region_width_spinbox.valueChanged.connect(
-            lambda val: self.pattern_canvas.set_region_size(val, self.region_height_spinbox.value())
-        )
-        self.region_height_spinbox.valueChanged.connect(
-            lambda val: self.pattern_canvas.set_region_size(self.region_width_spinbox.value(), val)
-        )
-        # self.grid_spacing_spinbox.valueChanged connection removed
+        self.shape_type_combo.currentTextChanged.connect(self._on_shape_mode_changed)
+        self.shape_size_spinbox.valueChanged.connect(self._on_shape_size_changed)
+        
         self.show_grid_checkbox.toggled.connect(self.pattern_canvas.toggle_grid)
         self.clear_pattern_button.clicked.connect(self.pattern_canvas.clear_pattern)
         self.pattern_canvas.pattern_updated_signal.connect(self.on_pattern_updated)
         
         self.zoom_slider.valueChanged.connect(self._on_zoom_slider_changed)
         self.pattern_canvas.scale_changed_signal.connect(self._on_canvas_scale_changed)
+
+        # Initialize canvas shape params based on default UI
+        self._on_shape_mode_changed(self.shape_type_combo.currentText()) # Call after pattern_canvas is available
 
 
         # DMD controls
@@ -745,6 +796,21 @@ class MainWindow(QMainWindow):
         self.zoom_slider.setValue(slider_val)
         self.zoom_slider.blockSignals(False)
         self.zoom_label.setText(f"Zoom: {scale:.2f}x")
+
+    def _on_shape_mode_changed(self, shape_text):
+        if shape_text == "Square":
+            self.shape_size_label.setText("Side Length (px):")
+        elif shape_text == "Circle":
+            self.shape_size_label.setText("Diameter (px):")
+        
+        current_size = self.shape_size_spinbox.value()
+        if hasattr(self, 'pattern_canvas') and self.pattern_canvas: # Ensure canvas exists
+            self.pattern_canvas.set_shape_params(shape_text, current_size)
+
+    def _on_shape_size_changed(self, size):
+        current_mode = self.shape_type_combo.currentText()
+        if hasattr(self, 'pattern_canvas') and self.pattern_canvas: # Ensure canvas exists
+            self.pattern_canvas.set_shape_params(current_mode, size)
 
 
 if __name__ == '__main__':
