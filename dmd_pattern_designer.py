@@ -511,7 +511,7 @@ class MainWindow(QMainWindow):
 
     def _set_buttons_enabled_state(self, dmd_ready, sequence_running):
         self.send_button.setEnabled(dmd_ready and not sequence_running)
-        self.stop_button.setEnabled(dmd_ready and sequence_running) # Or just dmd_ready if stop can be called anytime
+        self.stop_button.setEnabled(dmd_ready) # Enabled if DMD is ready, regardless of sequence_running
         # Other controls can be disabled during sequence running if needed
         self.clear_pattern_button.setEnabled(not sequence_running)
         self.shape_type_combo.setEnabled(not sequence_running)
