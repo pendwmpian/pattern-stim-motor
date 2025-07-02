@@ -7,10 +7,15 @@ from PyQt6.QtWidgets import (
     QMessageBox, QSizePolicy, QSpacerItem, QFrame, QStatusBar
 )
 from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, QObject, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QTransform, QFontMetrics
+from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QTransform, QFontMetrics, QPixmap
 import math
 
-# Try to import the DMD control module
+# Try to import the Camera and DMD control modules
+try:
+    from camera_control import CameraManager
+except ImportError:
+    QMessageBox.critical(None, "Import Error", "Could not import 'CameraManager' from 'camera_control.py'.")
+    sys.exit(1)
 try:
     from pattern_on_the_fly import PatternOnTheFly
 except ImportError:
@@ -55,6 +60,7 @@ class PatternCanvas(QGraphicsView):
 
         self.numpy_pattern = np.zeros((DMD_HEIGHT, DMD_WIDTH), dtype=np.uint8)
         self.active_regions_items = []
+        self.background_pixmap = None
 
         # Shape drawing parameters
         self.current_shape_mode = "Square" # Default shape
@@ -249,6 +255,9 @@ class PatternCanvas(QGraphicsView):
 
     def drawBackground(self, painter, rect):
         super().drawBackground(painter, rect)
+
+        if self.background_pixmap:
+            painter.drawPixmap(rect, self.background_pixmap, rect)
         
         if self.show_grid and self.base_grid_spacing > 0:
             current_adaptive_spacing = self._calculate_adaptive_grid_spacing()
@@ -341,6 +350,10 @@ class PatternCanvas(QGraphicsView):
         self.pattern_updated_signal.emit(self.numpy_pattern)
         self.scene.update()
 
+    def set_background_image(self, pixmap):
+        self.background_pixmap = pixmap
+        self.viewport().update()
+
     def get_pattern_array(self):
         return self.numpy_pattern.copy()
 
@@ -379,7 +392,7 @@ class DMDWorker(QObject):
         try:
             self.status_updated.emit("Initializing DMD...")
             # Using w, h and test=True as per typical usage and previous feedback context
-            self.dmd_instance = PatternOnTheFly(w=DMD_WIDTH, h=DMD_HEIGHT, test=True)
+            self.dmd_instance = PatternOnTheFly(w=DMD_WIDTH, h=DMD_HEIGHT, test=False)
             self._is_dmd_initialized = True
             self.status_updated.emit("DMD initialized successfully.")
             self.operation_finished.emit(True)
@@ -436,7 +449,7 @@ class DMDWorker(QObject):
             if pattern_array.dtype != np.uint8:
                  pattern_array = pattern_array.astype(np.uint8)
 
-            self.dmd_instance.DefinePattern(index=0, exposure=exposure_us, darktime=darktime_us, data=pattern_array)
+            self.dmd_instance.DefinePattern(0, exposure=exposure_us, darktime=darktime_us, data=pattern_array)
             self.dmd_instance.SendImageSequence(nPattern=1, nRepeat=num_repeats)
             self.dmd_instance.StartRunning()
             
@@ -492,10 +505,16 @@ class DMDWorker(QObject):
 
 
 class MainWindow(QMainWindow):
+    # DMD Signals
     request_initialize_dmd = pyqtSignal()
     request_send_sequence = pyqtSignal(np.ndarray, float, float, float)
     request_stop_dmd = pyqtSignal()
     request_cleanup_dmd = pyqtSignal()
+
+    # Camera Signals
+    request_initialize_camera = pyqtSignal()
+    request_snap_image = pyqtSignal()
+    request_cleanup_camera = pyqtSignal()
 
     def __init__(self):
         super().__init__()
@@ -504,9 +523,11 @@ class MainWindow(QMainWindow):
 
         self._setup_ui()
         self._setup_dmd_thread()
+        self._setup_camera_thread()
         self._connect_signals()
 
         self.request_initialize_dmd.emit()
+        self.request_initialize_camera.emit()
         self._set_buttons_enabled_state(dmd_ready=False, sequence_running=False)
 
     def _set_buttons_enabled_state(self, dmd_ready, sequence_running):
@@ -620,6 +641,17 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(temporal_group)
         controls_layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
+        # Camera Control Panel
+        camera_control_group = QFrame()
+        camera_control_group.setFrameShape(QFrame.Shape.StyledPanel)
+        camera_control_layout = QVBoxLayout(camera_control_group)
+        camera_control_layout.addWidget(QLabel("<b>Camera Control</b>"), alignment=Qt.AlignmentFlag.AlignCenter)
+        self.snap_button = QPushButton("Acquire Background Image")
+        camera_control_layout.addWidget(self.snap_button)
+        self.clear_background_button = QPushButton("Clear Background Image")
+        camera_control_layout.addWidget(self.clear_background_button)
+        controls_layout.addWidget(camera_control_group)
+
         # DMD Control Panel
         dmd_control_group = QFrame()
         dmd_control_group.setFrameShape(QFrame.Shape.StyledPanel)
@@ -664,6 +696,24 @@ class MainWindow(QMainWindow):
         
         self.dmd_thread.start()
 
+    def _setup_camera_thread(self):
+        self.camera_thread = QThread()
+        self.camera_worker = CameraManager()
+        self.camera_worker.moveToThread(self.camera_thread)
+
+        # Connect worker signals to main thread slots
+        self.camera_worker.status_updated.connect(self.update_status_bar)
+        self.camera_worker.error_occurred.connect(self.show_error_message)
+        self.camera_worker.image_acquired.connect(self.on_background_image_acquired)
+        self.camera_worker.camera_initialized.connect(lambda ok: self.snap_button.setEnabled(ok))
+
+        # Connect main thread signals to worker slots
+        self.request_initialize_camera.connect(self.camera_worker.initialize_camera)
+        self.request_snap_image.connect(self.camera_worker.snap_image)
+        self.request_cleanup_camera.connect(self.camera_worker.cleanup_camera)
+        
+        self.camera_thread.start()
+
     def _connect_signals(self):
         # Spatial controls
         self.shape_type_combo.currentTextChanged.connect(self._on_shape_mode_changed)
@@ -683,6 +733,17 @@ class MainWindow(QMainWindow):
         # DMD controls
         self.send_button.clicked.connect(self.on_send_sequence_clicked)
         self.stop_button.clicked.connect(self.on_stop_dmd_clicked)
+
+        # Camera controls
+        self.snap_button.clicked.connect(self.request_snap_image)
+        self.clear_background_button.clicked.connect(lambda: self.pattern_canvas.set_background_image(None))
+
+    @pyqtSlot(np.ndarray)
+    def on_background_image_acquired(self, image_array):
+        q_image = self.camera_worker.numpy_to_qimage(image_array)
+        pixmap = QPixmap.fromImage(q_image)
+        self.pattern_canvas.set_background_image(pixmap)
+        self.update_status_bar("Background image updated.")
 
     def on_pattern_updated(self, pattern_array):
         # Could update some stats here if needed, e.g., number of active pixels
@@ -762,14 +823,23 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.status_bar.showMessage("Shutting down...")
+        
+        # Cleanup Camera Thread
+        if self.camera_thread.isRunning():
+            self.request_cleanup_camera.emit()
+            self.camera_thread.quit()
+            if not self.camera_thread.wait(3000):
+                self.update_status_bar("Camera thread did not stop gracefully.")
+                self.camera_thread.terminate()
+
+        # Cleanup DMD Thread
         if self.dmd_thread.isRunning():
-            self.request_cleanup_dmd.emit() # Request cleanup
-            self.dmd_thread.quit()          # Ask thread to quit
-        if not self.dmd_thread.wait(5000): # Wait up to 5s for thread to finish
-            self.update_status_bar("DMD thread did not stop gracefully. Forcing exit.")
-            if self.dmd_thread.isRunning(): # Check again before terminating
-                self.dmd_thread.terminate() # Force terminate if it doesn't quit
-                self.dmd_thread.wait()      # Wait for termination
+            self.request_cleanup_dmd.emit()
+            self.dmd_thread.quit()
+            if not self.dmd_thread.wait(3000):
+                self.update_status_bar("DMD thread did not stop gracefully.")
+                self.dmd_thread.terminate()
+
         super().closeEvent(event)
 
     def _on_zoom_slider_changed(self, value):
