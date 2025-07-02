@@ -1,20 +1,25 @@
 import sys
+import os
 import numpy as np
 from PyQt6.QtCore import QObject, pyqtSignal, pyqtSlot, QThread
 from PyQt6.QtGui import QImage
 import time
 
 try:
-    from thorcam.camera import ThorCam
+    from thorlabs_tsi_sdk.tl_camera import TLCameraSDK, TLCamera
+    from thorlabs_tsi_sdk.tl_camera_enums import SENSOR_TYPE
 except ImportError:
-    print("Error: 'thorcam' library not found.")
-    print("Please install it using: pip install thorcam")
+    print("Error: 'thorlabs_tsi_sdk' library not found.")
+    print("Please install it from the Thorlabs examples repository.")
     sys.exit(1)
+
+for p in os.environ['PATH'].split(os.pathsep):
+    if os.path.isdir(p):
+        os.add_dll_directory(p)
 
 class CameraManager(QObject):
     """
-    A QObject class to manage a Thorlabs camera in a separate thread.
-    Handles initialization, image acquisition, and cleanup.
+    A QObject class to manage a Thorlabs camera in a separate thread using the official SDK package.
     """
     image_acquired = pyqtSignal(np.ndarray)
     status_updated = pyqtSignal(str)
@@ -23,148 +28,145 @@ class CameraManager(QObject):
 
     def __init__(self):
         super().__init__()
+        self.sdk = None
         self.camera = None
         self._is_initialized = False
 
     @pyqtSlot()
     def initialize_camera(self):
-        """
-        Initializes the connection to the Thorlabs camera.
-        """
         if self._is_initialized:
             self.status_updated.emit("Camera already initialized.")
             self.camera_initialized.emit(True)
             return
 
         try:
-            self.status_updated.emit("Searching for Thorlabs camera...")
-            # ThorCam() might block, which is why this is in a worker thread
-            self.camera = ThorCam()
-            self.status_updated.emit("Camera found. Initializing...")
-            # Further setup might be needed here depending on camera model
-            # For example: self.camera.set_exposure(10)
+            self.status_updated.emit("Initializing Thorlabs SDK...")
+            self.sdk = TLCameraSDK()
+            available_cameras = self.sdk.discover_available_cameras()
+            if not available_cameras:
+                raise Exception("No Thorlabs cameras found.")
+
+            self.status_updated.emit(f"Found cameras: {available_cameras}")
+            camera_sn = available_cameras[0]
+            
+            self.camera = self.sdk.open_camera(camera_sn)
+            
+            # Basic configuration
+            self.camera.exposure_time_us = 10000  # 10 ms
+            self.camera.frames_per_trigger_zero_for_unlimited = 0
+            self.camera.image_poll_timeout_ms = 5000 # Increased timeout
+
             self._is_initialized = True
-            self.status_updated.emit("Camera initialized successfully.")
+            self.status_updated.emit(f"Camera {camera_sn} initialized successfully.")
             self.camera_initialized.emit(True)
+
         except Exception as e:
             error_msg = f"Failed to initialize camera: {e}"
             self.error_occurred.emit(error_msg)
-            self.camera = None
-            self._is_initialized = False
+            self.cleanup_camera()
             self.camera_initialized.emit(False)
 
     @pyqtSlot()
-    def acquire_image(self):
-        """
-        Captures a single frame from the camera.
-        """
+    def snap_image(self):
         if not self._is_initialized or not self.camera:
             self.error_occurred.emit("Cannot acquire image. Camera not initialized.")
             return
 
         try:
             self.status_updated.emit("Acquiring image...")
-            # The fetch_image() method should return a numpy array
-            image_array = self.camera.fetch_image()
-            if image_array is not None:
-                self.status_updated.emit(f"Image acquired with shape: {image_array.shape}")
+            
+            self.camera.arm(2) # Arm for 2 frames
+            self.camera.issue_software_trigger()
+            
+            frame = self.camera.get_pending_frame_or_null()
+            if frame is not None:
+                image_array = np.copy(frame.image_buffer)
                 self.image_acquired.emit(image_array)
+                self.status_updated.emit(f"Image acquired with shape: {image_array.shape}")
             else:
-                self.error_occurred.emit("Failed to acquire image (received None).")
+                self.error_occurred.emit("Failed to acquire image (timeout).")
+
+            self.camera.disarm()
+
         except Exception as e:
             self.error_occurred.emit(f"Error during image acquisition: {e}")
+            if self.camera:
+                self.camera.disarm()
 
     @pyqtSlot()
     def cleanup_camera(self):
-        """
-        Releases the camera resources.
-        """
+        self.status_updated.emit("Releasing camera resources...")
         if self.camera:
-            self.status_updated.emit("Releasing camera resources...")
-            try:
-                self.camera.close()
-                self.camera = None
-                self._is_initialized = False
-                self.status_updated.emit("Camera resources released.")
-            except Exception as e:
-                self.error_occurred.emit(f"Error closing camera: {e}")
+            self.camera.dispose()
+            self.camera = None
+        
+        if self.sdk:
+            self.sdk.dispose()
+            self.sdk = None
+        
+        self._is_initialized = False
+        self.status_updated.emit("Camera resources released.")
 
     @staticmethod
     def numpy_to_qimage(array):
-        """
-        Converts a NumPy array to a QImage.
-        Assumes the input array is a 2D grayscale image (H, W).
-        """
         if array is None:
             return QImage()
         
+        if array.dtype != np.uint8:
+             array = ((array - array.min()) / (array.max() - array.min()) * 255).astype(np.uint8)
+
         height, width = array.shape
         bytes_per_line = width
-        
-        # The QImage constructor expects data to be contiguous.
-        # The format depends on the numpy array's dtype.
-        if array.dtype == np.uint8:
-            return QImage(array.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
-        elif array.dtype == np.uint16:
-            # QImage doesn't have a 16-bit grayscale format directly.
-            # We can normalize to 8-bit for display purposes.
-            normalized_array = ((array - array.min()) / (array.max() - array.min()) * 255).astype(np.uint8)
-            return QImage(normalized_array.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
-        else:
-            # Handle other types or raise an error
-            print(f"Unsupported numpy dtype for QImage conversion: {array.dtype}")
-            return QImage()
+        return QImage(array.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
 
 
 def run_camera_test():
-    """
-    A simple standalone test function to verify camera operation.
-    This requires a QApplication instance to handle signals/slots.
-    """
     from PyQt6.QtWidgets import QApplication
+    from PyQt6.QtCore import QCoreApplication
 
     app = QApplication(sys.argv)
-
-    print("--- Camera Control Test ---")
+    print("--- Camera Control Test (Official SDK Package) ---")
     
-    # We need a thread to run the manager
     camera_thread = QThread()
     camera_manager = CameraManager()
     camera_manager.moveToThread(camera_thread)
 
-    # Connect signals to print statements
     camera_manager.status_updated.connect(lambda msg: print(f"[STATUS] {msg}"))
     camera_manager.error_occurred.connect(lambda err: print(f"[ERROR] {err}"))
-    camera_manager.camera_initialized.connect(lambda success: print(f"[INIT] Success: {success}"))
     camera_manager.image_acquired.connect(lambda img: print(f"[IMAGE] Acquired image with shape: {img.shape}, dtype: {img.dtype}"))
+    
+    is_initialized = False
+    def on_initialized(success):
+        nonlocal is_initialized
+        is_initialized = success
+        print(f"[INIT] Success: {success}")
 
-    # Start the thread
+    camera_manager.camera_initialized.connect(on_initialized)
     camera_thread.start()
 
-    # --- Test Sequence ---
     print("\n1. Requesting camera initialization...")
-    QThread.msleep(100) # Give thread time to start
     camera_manager.initialize_camera()
-    QThread.msleep(3000) # Wait for initialization
-
-    if camera_manager._is_initialized:
-        print("\n2. Requesting image acquisition...")
-        camera_manager.acquire_image()
-        QThread.msleep(1000) # Wait for acquisition
+    
+    for _ in range(10):
+        if is_initialized:
+            break
+        QThread.msleep(500)
+    
+    if is_initialized:
+        print("\n2. Requesting image snap...")
+        camera_manager.snap_image()
+        QThread.msleep(1000)
     else:
-        print("\nSkipping image acquisition due to initialization failure.")
+        print("\nSkipping image snap due to initialization failure.")
 
     print("\n3. Requesting camera cleanup...")
     camera_manager.cleanup_camera()
-    QThread.msleep(1000) # Wait for cleanup
+    QThread.msleep(1000)
 
-    # --- Shutdown ---
     print("\n--- Test Finished ---")
     camera_thread.quit()
     camera_thread.wait(2000)
-    app.quit()
-
+    QCoreApplication.instance().quit()
 
 if __name__ == '__main__':
-    # This allows you to run this file directly to test camera functionality.
     run_camera_test()
