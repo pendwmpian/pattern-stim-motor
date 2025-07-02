@@ -8,6 +8,8 @@ import time
 try:
     from thorlabs_tsi_sdk.tl_camera import TLCameraSDK, TLCamera
     from thorlabs_tsi_sdk.tl_camera_enums import SENSOR_TYPE
+    from thorlabs_tsi_sdk.tl_mono_to_color_processor import MonoToColorProcessorSDK
+    from thorlabs_tsi_sdk.tl_color_enums import FORMAT
 except ImportError:
     print("Error: 'thorlabs_tsi_sdk' library not found.")
     print("Please install it from the Thorlabs examples repository.")
@@ -15,7 +17,10 @@ except ImportError:
 
 for p in os.environ['PATH'].split(os.pathsep):
     if os.path.isdir(p):
-        os.add_dll_directory(p)
+        try:
+            os.add_dll_directory(p)
+        except (FileNotFoundError, TypeError):
+            pass # Ignore paths that don't exist or are not unicode
 
 class CameraManager(QObject):
     """
@@ -30,6 +35,8 @@ class CameraManager(QObject):
         super().__init__()
         self.sdk = None
         self.camera = None
+        self.color_sdk = None
+        self.color_processor = None
         self._is_initialized = False
 
     @pyqtSlot()
@@ -40,8 +47,10 @@ class CameraManager(QObject):
             return
 
         try:
-            self.status_updated.emit("Initializing Thorlabs SDK...")
+            self.status_updated.emit("Initializing Thorlabs SDKs...")
             self.sdk = TLCameraSDK()
+            self.color_sdk = MonoToColorProcessorSDK()
+            
             available_cameras = self.sdk.discover_available_cameras()
             if not available_cameras:
                 raise Exception("No Thorlabs cameras found.")
@@ -51,10 +60,21 @@ class CameraManager(QObject):
             
             self.camera = self.sdk.open_camera(camera_sn)
             
-            # Basic configuration
-            self.camera.exposure_time_us = 10000  # 10 ms
+            self.camera.exposure_time_us = 10000
             self.camera.frames_per_trigger_zero_for_unlimited = 0
-            self.camera.image_poll_timeout_ms = 5000 # Increased timeout
+            self.camera.image_poll_timeout_ms = 5000
+
+            if self.camera.camera_sensor_type == SENSOR_TYPE.BAYER:
+                self.status_updated.emit("Color sensor detected. Initializing color processor...")
+                self.color_processor = self.color_sdk.create_mono_to_color_processor(
+                    camera_sensor_type=self.camera.camera_sensor_type,
+                    color_filter_array_phase=self.camera.color_filter_array_phase,
+                    color_correction_matrix=self.camera.get_color_correction_matrix(),
+                    default_white_balance_matrix=self.camera.get_default_white_balance_matrix(),
+                    bit_depth=self.camera.bit_depth
+                )
+                self.color_processor.output_format = FORMAT.BGR_PIXEL
+                self.status_updated.emit("Color processor initialized.")
 
             self._is_initialized = True
             self.status_updated.emit(f"Camera {camera_sn} initialized successfully.")
@@ -74,23 +94,37 @@ class CameraManager(QObject):
 
         try:
             self.status_updated.emit("Acquiring image...")
-            
-            self.camera.arm(2) # Arm for 2 frames
+            self.camera.arm(2)
             self.camera.issue_software_trigger()
             
             frame = self.camera.get_pending_frame_or_null()
-            if frame is not None:
-                image_array = np.copy(frame.image_buffer)
-                self.image_acquired.emit(image_array)
-                self.status_updated.emit(f"Image acquired with shape: {image_array.shape}")
+            if frame is None:
+                raise Exception("Timeout waiting for frame.")
+
+            self.status_updated.emit(f"Raw frame received. Shape: {frame.image_buffer.shape}")
+
+            if self.color_processor:
+                self.status_updated.emit("Processing color image...")
+                width = self.camera.image_width_pixels
+                height = self.camera.image_height_pixels
+                color_image_data = self.color_processor.transform_to_24(
+                    frame.image_buffer,
+                    width,
+                    height
+                )
+                # Reshape the 1D array into a 3D (height, width, 3) array
+                image_array = color_image_data.reshape(height, width, 3)
             else:
-                self.error_occurred.emit("Failed to acquire image (timeout).")
+                image_array = np.copy(frame.image_buffer)
+
+            self.image_acquired.emit(image_array)
+            self.status_updated.emit(f"Image acquired with shape: {image_array.shape}")
 
             self.camera.disarm()
 
         except Exception as e:
             self.error_occurred.emit(f"Error during image acquisition: {e}")
-            if self.camera:
+            if self.camera and self.camera.is_armed:
                 self.camera.disarm()
 
     @pyqtSlot()
@@ -99,10 +133,15 @@ class CameraManager(QObject):
         if self.camera:
             self.camera.dispose()
             self.camera = None
-        
+        if self.color_processor:
+            self.color_processor.dispose()
+            self.color_processor = None
         if self.sdk:
             self.sdk.dispose()
             self.sdk = None
+        if self.color_sdk:
+            self.color_sdk.dispose()
+            self.color_sdk = None
         
         self._is_initialized = False
         self.status_updated.emit("Camera resources released.")
@@ -115,14 +154,21 @@ class CameraManager(QObject):
         if array.dtype != np.uint8:
              array = ((array - array.min()) / (array.max() - array.min()) * 255).astype(np.uint8)
 
-        height, width = array.shape
-        bytes_per_line = width
-        return QImage(array.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
+        if len(array.shape) == 3: # Color image
+            height, width, channel = array.shape
+            bytes_per_line = 3 * width
+            # The color processor outputs BGR, so we need to swap to RGB for QImage
+            return QImage(array.data, width, height, bytes_per_line, QImage.Format.Format_RGB888).rgbSwapped()
+        else: # Grayscale
+            height, width = array.shape
+            bytes_per_line = width
+            return QImage(array.data, width, height, bytes_per_line, QImage.Format.Format_Grayscale8)
 
 
 def run_camera_test():
     from PyQt6.QtWidgets import QApplication
     from PyQt6.QtCore import QCoreApplication
+    from PIL import Image as PILImage
 
     app = QApplication(sys.argv)
     print("--- Camera Control Test (Official SDK Package) ---")
@@ -131,9 +177,26 @@ def run_camera_test():
     camera_manager = CameraManager()
     camera_manager.moveToThread(camera_thread)
 
+    def save_image(img_array):
+        print(f"[IMAGE] Acquired image with shape: {img_array.shape}, dtype: {img_array.dtype}")
+        try:
+            if img_array.dtype != np.uint8:
+                img_array = ((img_array - img_array.min()) / (img_array.max() - img_array.min()) * 255).astype(np.uint8)
+            
+            # The SDK outputs BGR, PIL expects RGB.
+            if len(img_array.shape) == 3:
+                img_array = img_array[:, :, ::-1] # BGR to RGB
+
+            img = PILImage.fromarray(img_array)
+            save_path = "test_capture.png"
+            img.save(save_path)
+            print(f"--- Image saved to {save_path} ---")
+        except Exception as e:
+            print(f"[ERROR] Failed to save image: {e}")
+
     camera_manager.status_updated.connect(lambda msg: print(f"[STATUS] {msg}"))
     camera_manager.error_occurred.connect(lambda err: print(f"[ERROR] {err}"))
-    camera_manager.image_acquired.connect(lambda img: print(f"[IMAGE] Acquired image with shape: {img.shape}, dtype: {img.dtype}"))
+    camera_manager.image_acquired.connect(save_image)
     
     is_initialized = False
     def on_initialized(success):
