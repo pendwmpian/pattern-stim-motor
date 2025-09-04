@@ -100,13 +100,15 @@ class _ImageAcquisitionThread(threading.Thread):
             return scaled_image.astype(np.uint8)
 
     def run(self):
+        self._frame_cnt = 0
         print("Image acquisition thread started.")
         while not self._stop_event.is_set():
             try:
                 frame = self._camera.get_pending_frame_or_null()
                 if frame is not None:
                     image_np = self._process_frame(frame)
-                    self._image_queue.put_nowait(image_np)
+                    self._image_queue.put_nowait((image_np, self._frame_cnt))
+                    self._frame_cnt += 1
             except queue.Full:
                 pass
             except Exception as e:
@@ -176,7 +178,7 @@ class ThorlabsCameraController:
         try:
             return self._image_queue.get_nowait()
         except queue.Empty:
-            return None
+            return (None, None)
 
     def close(self):
         """Stops the stream and releases all resources."""

@@ -19,7 +19,7 @@ def main():
             
             while True:
                 # The only function you need to call to get a frame!
-                image_np = controller.get_nowait()
+                image_np, image_no = controller.get_nowait()
 
                 # If a new frame is available, display it
                 if image_np is not None:
@@ -30,6 +30,7 @@ def main():
                         display_image = image_np
 
                     cv2.imshow('Thorlabs Camera Live View', display_image)
+                    print(image_no)
 
                 # Check for the 'q' key to quit
                 if cv2.waitKey(10) & 0xFF == ord('q'):
