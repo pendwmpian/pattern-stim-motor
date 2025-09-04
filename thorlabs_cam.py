@@ -25,6 +25,44 @@ for p in os.environ['PATH'].split(os.pathsep):
 
 
 
+class CircularQueue(queue.Queue):
+    """
+    A thread-safe queue with a fixed size that discards the oldest item
+    when it is full.
+
+    This class inherits from queue.Queue and overrides the put() method
+    to implement a circular buffer behavior. When a new item is put into a
+    full queue, the oldest item is removed to make space.
+    """
+    def put(self, item, block=True, timeout=None):
+        """
+        Put an item into the queue.
+
+        If the queue is full, it removes the oldest item and then adds the new
+        item. This operation is thread-safe. The `block` and `timeout`
+        arguments are ignored to maintain non-blocking behavior on a full queue
+        but are kept for compatibility with the base class method signature.
+        """
+        with self.not_full:
+            if self.maxsize > 0:
+                if self._qsize() >= self.maxsize:
+                    try:
+                        self._get()
+                    except queue.Empty:
+                        pass
+            
+            self._put(item)
+            self.not_empty.notify()
+
+    def put_nowait(self, item):
+        """
+        A non-blocking variant of put().
+        This is equivalent to calling put(item, block=False).
+        """
+        return self.put(item, block=False)
+
+
+
 class _ImageAcquisitionThread(threading.Thread):
     """
     (Internal) A thread that continuously acquires images and places them into a queue.
@@ -43,7 +81,7 @@ class _ImageAcquisitionThread(threading.Thread):
                 self._camera.bit_depth)
         self._bit_depth = camera.bit_depth
         self._camera.image_poll_timeout_ms = 0
-        self._image_queue = queue.Queue(maxsize=2)
+        self._image_queue = CircularQueue(maxsize=2)
         self._stop_event = threading.Event()
 
     def get_output_queue(self) -> queue.Queue:
