@@ -130,7 +130,7 @@ def detect_vertices_from_edges(edges_image, color_image_for_drawing, output_path
 # =============================================================================
 #  Main Program Logic
 # =============================================================================
-def main():
+def get_alignment_transform():
     """
     Initializes the camera, captures a single image, processes it to find
     the FOV circle, and displays the result.
@@ -253,13 +253,6 @@ def main():
             print(M)
             print("----------------------------------------------------------")
 
-            # Final visualization
-            final_display_image = cv2.imread('result_with_vertices.png')
-            cv2.imshow("Final Result", final_display_image)
-            cv2.waitKey(0)
-
-        cv2.destroyAllWindows()
-        print("\nApplication finished.")
-
-if __name__ == "__main__":
-    main()
+            return M
+        
+        else: return None

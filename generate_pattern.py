@@ -29,7 +29,7 @@ def generate_triangle_pattern(width, height, triangle_width, line_width):
     half_width = triangle_width // 2
     
     # Define 3 points for the triangle
-    pt1 = (center_x - half_width, center_y + int(half_width * 0.8))
+    pt1 = (center_x - half_width, center_y + int(half_width * 1.8))
     pt2 = (center_x + half_width, center_y + int(half_width * 0.5))
     pt3 = (center_x, center_y - half_width)
 
@@ -39,6 +39,10 @@ def generate_triangle_pattern(width, height, triangle_width, line_width):
     cv2.line(image, pt1, pt2, (255, 255, 255), line_width)
     cv2.line(image, pt2, pt3, (255, 255, 255), line_width)
     cv2.line(image, pt3, pt1, (255, 255, 255), line_width)
+
+    # pts = np.array(vertices, np.int32)
+    # pts = pts.reshape((-1, 1, 2))
+    # cv2.fillPoly(image, [pts], 255)
 
     return image, vertices
 
