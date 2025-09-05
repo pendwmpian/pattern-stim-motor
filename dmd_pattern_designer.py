@@ -1,34 +1,42 @@
+# main_gui_with_live_background.py
+
 import sys
 import numpy as np
+import cv2
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QPushButton, QLabel, QSpinBox, QDoubleSpinBox, QSlider, QComboBox,
     QGraphicsView, QGraphicsScene, QGraphicsRectItem, QGraphicsEllipseItem, QCheckBox,
-    QMessageBox, QSizePolicy, QSpacerItem, QFrame, QStatusBar
+    QMessageBox, QSizePolicy, QSpacerItem, QFrame, QStatusBar, QGraphicsPixmapItem
 )
 from PyQt6.QtCore import Qt, QPointF, QRectF, QThread, QObject, pyqtSignal, pyqtSlot
-from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QTransform, QFontMetrics, QPixmap
+from PyQt6.QtGui import QPainter, QPen, QBrush, QColor, QTransform, QFontMetrics, QImage, QPixmap
 import math
+import time
 
-# Try to import the Camera and DMD control modules
+# --- NEW: Import alignment script and camera controller ---
 try:
-    from camera_control import CameraManager
-except ImportError:
-    QMessageBox.critical(None, "Import Error", "Could not import 'CameraManager' from 'camera_control.py'.")
+    from align_fov import get_alignment_transform
+    from thorlabs_cam import ThorlabsCameraController
+except ImportError as e:
+    QMessageBox.critical(None, "Module Import Error",
+                         f"Could not import required modules.\n"
+                         f"Please ensure 'full_alignment_script.py' and 'thorlabs_cam.py' are present.\n"
+                         f"Error: {e}")
     sys.exit(1)
+
+# Try to import the DMD control module
 try:
     from pattern_on_the_fly import PatternOnTheFly
 except ImportError:
-    # This message box might not be ideal if running headlessly, but good for GUI app
-    app_temp = QApplication.instance() # Check if app exists
+    app_temp = QApplication.instance()
     if not app_temp:
-        app_temp = QApplication(sys.argv) # Create temp for message box
-    
+        app_temp = QApplication(sys.argv)
     QMessageBox.critical(None, "Import Error",
                          "Could not import 'PatternOnTheFly' from 'pattern_on_the_fly.py'.\n"
                          "Please ensure the file is in the same directory or in the Python path, "
                          "and that it's a valid module.")
-    if not QApplication.instance(): # if we created app_temp, and it's the only one
+    if not QApplication.instance():
         app_temp.quit()
     sys.exit(1)
 
@@ -41,16 +49,64 @@ DEFAULT_ON_DURATION_MS = 100.0
 DEFAULT_OFF_DURATION_MS = 100.0
 DEFAULT_TOTAL_DURATION_MS = 1000.0
 
-class PatternCanvas(QGraphicsView):
-    """
-    A QGraphicsView widget for interactively designing spatial patterns.
-    Displays a representation of the DMD surface where users can define active regions.
-    """
-    pattern_updated_signal = pyqtSignal(np.ndarray)
-    scale_changed_signal = pyqtSignal(float) # To update zoom slider
 
+### --- NEW: Worker for Alignment Process ---
+class AlignmentWorker(QObject):
+    """
+    Runs the long alignment process in a separate thread.
+    """
+    transform_ready = pyqtSignal(object) # Emits the matrix or None
+    status_update = pyqtSignal(str)
+
+    @pyqtSlot()
+    def run_alignment(self):
+        self.status_update.emit("Starting alignment... This may take several seconds.")
+        try:
+            transform_matrix = get_alignment_transform()
+            self.transform_ready.emit(transform_matrix)
+        except Exception as e:
+            self.status_update.emit(f"Alignment failed: {e}")
+            self.transform_ready.emit(None)
+
+### --- NEW: Worker for Camera Live Feed ---
+class CameraWorker(QObject):
+    """
+    Continuously acquires frames from the Thorlabs camera in a thread.
+    """
+    new_frame = pyqtSignal(np.ndarray)
+    status_update = pyqtSignal(str)
+    error_occurred = pyqtSignal(str)
+    
+    def __init__(self):
+        super().__init__()
+        self._is_running = False
+
+    @pyqtSlot()
+    def start_streaming(self):
+        self.status_update.emit("Starting camera stream...")
+        try:
+            with ThorlabsCameraController(camera_index=0) as controller:
+                self._is_running = True
+                while self._is_running:
+                    frame, _ = controller.get_nowait()
+                    if frame is not None:
+                        self.new_frame.emit(frame)
+                    QThread.msleep(33) # ~30 FPS
+            self.status_update.emit("Camera stream stopped.")
+        except Exception as e:
+            self.error_occurred.emit(f"Camera error: {e}")
+
+    def stop_streaming(self):
+        self.status_update.emit("Requesting to stop camera stream...")
+        self._is_running = False
+
+
+class PatternCanvas(QGraphicsView):
+    # (The class definition is the same as before)
+    pattern_updated_signal = pyqtSignal(np.ndarray)
+    scale_changed_signal = pyqtSignal(float)
     MIN_ZOOM_SCALE = 0.1
-    MAX_ZOOM_SCALE = 10.0 # User feedback indicated previous version ran, likely with 10.0
+    MAX_ZOOM_SCALE = 10.0
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -60,23 +116,67 @@ class PatternCanvas(QGraphicsView):
 
         self.numpy_pattern = np.zeros((DMD_HEIGHT, DMD_WIDTH), dtype=np.uint8)
         self.active_regions_items = []
-        self.background_pixmap = None
 
-        # Shape drawing parameters
-        self.current_shape_mode = "Square" # Default shape
-        self.current_shape_size = DEFAULT_REGION_SIZE # Side for square, diameter for circle
+        # --- NEW: Attributes for microscope background ---
+        self.background_pixmap_item = QGraphicsPixmapItem()
+        self.scene.addItem(self.background_pixmap_item)
+        self.background_pixmap_item.setZValue(-1) # Ensure it's behind everything
+        self.inverse_transform = None
+        # --- END NEW ---
 
+        self.current_shape_mode = "Square"
+        self.current_shape_size = DEFAULT_REGION_SIZE
         self.show_grid = False
         self.base_grid_spacing = DEFAULT_GRID_SPACING
         self.grid_pen = QPen(QColor(Qt.GlobalColor.darkGray), 0.5, Qt.PenStyle.SolidLine)
-        self.grid_label_pen = QPen(QColor(Qt.GlobalColor.lightGray), 1) # Pen for grid labels
+        self.grid_label_pen = QPen(QColor(Qt.GlobalColor.lightGray), 1)
         self.dmd_outline_pen = QPen(QColor(Qt.GlobalColor.red), 2, Qt.PenStyle.SolidLine)
-
         self._current_scale_factor = 1.0
-        self._is_fitting_in_view = False # Flag to prevent recursion during initial fitInView
-
+        self._is_fitting_in_view = False
         self._setup_ui()
         self.clear_pattern()
+
+    # --- NEW: Slot to update the background image ---
+    @pyqtSlot(np.ndarray)
+    def update_background_image(self, frame):
+        """Receives a new frame from the camera worker and updates the background."""
+        if self.inverse_transform is None:
+            return # Don't do anything until alignment is complete
+
+        # Convert numpy array (RGB) to QPixmap
+        h, w, ch = frame.shape
+        bytes_per_line = ch * w
+        q_image = QImage(frame.data, w, h, bytes_per_line, QImage.Format.Format_RGB888)
+        pixmap = QPixmap.fromImage(q_image)
+
+        # Apply the inverse transform to the pixmap item
+        self.background_pixmap_item.setPixmap(pixmap)
+
+    # --- NEW: Slot to set the transformation matrix ---
+    @pyqtSlot(object)
+    def set_alignment_matrix(self, matrix):
+        """Receives the alignment matrix M, inverts it, and stores it."""
+        if matrix is not None:
+            try:
+                # Calculate the inverse matrix for mapping Camera -> DMD
+                inverse_matrix = cv2.invertAffineTransform(matrix)
+                
+                # Convert 2x3 NumPy matrix to a QTransform
+                # QTransform(m11, m12, m21, m22, dx, dy)
+                # Note the order difference between OpenCV and QTransform!
+                # OpenCV: [m11, m12, dx], [m21, m22, dy]
+                # QTransform constructor takes row-major: m11, m21, m12, m22, dx, dy
+                m = inverse_matrix
+                self.inverse_transform = QTransform(m[0,0], m[1,0], 0,  # col 1
+                                                    m[0,1], m[1,1], 0,  # col 2
+                                                    m[0,2], m[1,2], 1) # col 3
+                self.background_pixmap_item.setTransform(self.inverse_transform)
+                print("Canvas received and set inverse transform.")
+            except Exception as e:
+                print(f"Error setting transform matrix: {e}")
+                self.inverse_transform = None
+        else:
+            self.inverse_transform = None
 
     def _setup_ui(self):
         self.setRenderHint(QPainter.RenderHint.Antialiasing, False)
@@ -255,9 +355,6 @@ class PatternCanvas(QGraphicsView):
 
     def drawBackground(self, painter, rect):
         super().drawBackground(painter, rect)
-
-        if self.background_pixmap:
-            painter.drawPixmap(rect, self.background_pixmap, rect)
         
         if self.show_grid and self.base_grid_spacing > 0:
             current_adaptive_spacing = self._calculate_adaptive_grid_spacing()
@@ -349,10 +446,6 @@ class PatternCanvas(QGraphicsView):
         self.numpy_pattern.fill(0)
         self.pattern_updated_signal.emit(self.numpy_pattern)
         self.scene.update()
-
-    def set_background_image(self, pixmap):
-        self.background_pixmap = pixmap
-        self.viewport().update()
 
     def get_pattern_array(self):
         return self.numpy_pattern.copy()
@@ -449,7 +542,7 @@ class DMDWorker(QObject):
             if pattern_array.dtype != np.uint8:
                  pattern_array = pattern_array.astype(np.uint8)
 
-            self.dmd_instance.DefinePattern(0, exposure=exposure_us, darktime=darktime_us, data=pattern_array)
+            self.dmd_instance.DefinePattern(index=0, exposure=exposure_us, darktime=darktime_us, data=pattern_array)
             self.dmd_instance.SendImageSequence(nPattern=1, nRepeat=num_repeats)
             self.dmd_instance.StartRunning()
             
@@ -504,36 +597,53 @@ class DMDWorker(QObject):
                 self.error_occurred.emit(f"DMD Cleanup Error: {e}")
 
 
+
 class MainWindow(QMainWindow):
-    # DMD Signals
+    # --- NEW: Add signals for Camera and Alignment workers ---
+    request_run_alignment = pyqtSignal()
+    request_start_camera = pyqtSignal()
+    # (Existing DMD signals are unchanged)
     request_initialize_dmd = pyqtSignal()
     request_send_sequence = pyqtSignal(np.ndarray, float, float, float)
     request_stop_dmd = pyqtSignal()
     request_cleanup_dmd = pyqtSignal()
 
-    # Camera Signals
-    request_initialize_camera = pyqtSignal()
-    request_snap_image = pyqtSignal()
-    request_cleanup_camera = pyqtSignal()
-
-    def __init__(self):
+    def __init__(self, alignment_matrix):
         super().__init__()
-        self.setWindowTitle("DMD Pattern Stimulator")
+        self.setWindowTitle("DMD Pattern Stimulator with Live View")
         self.setGeometry(100, 100, 1200, 800)
+        
+        if alignment_matrix is None:
+            raise ValueError("Alignment matrix cannot be None for MainWindow initialization.")
+            
+        self.alignment_matrix = alignment_matrix
+        self.is_aligned = True
 
         self._setup_ui()
         self._setup_dmd_thread()
         self._setup_camera_thread()
         self._connect_signals()
-
+        
+        self.process_initial_alignment()
         self.request_initialize_dmd.emit()
-        self.request_initialize_camera.emit()
         self._set_buttons_enabled_state(dmd_ready=False, sequence_running=False)
 
+    # NEW: Method to setup alignment and camera threads
+    def _setup_camera_thread(self):
+        # Camera Thread
+        self.camera_thread = QThread()
+        self.camera_worker = CameraWorker()
+        self.camera_worker.moveToThread(self.camera_thread)
+        self.camera_worker.status_update.connect(self.update_status_bar)
+        self.camera_worker.error_occurred.connect(self.show_error_message)
+        self.camera_worker.new_frame.connect(self.pattern_canvas.update_background_image)
+        self.request_start_camera.connect(self.camera_worker.start_streaming)
+        self.camera_thread.start()
+        
     def _set_buttons_enabled_state(self, dmd_ready, sequence_running):
+        # NEW: Send button now also depends on alignment
         self.send_button.setEnabled(dmd_ready and not sequence_running)
-        self.stop_button.setEnabled(dmd_ready) # Enabled if DMD is ready, regardless of sequence_running
-        # Other controls can be disabled during sequence running if needed
+        self.stop_button.setEnabled(dmd_ready)
         self.clear_pattern_button.setEnabled(not sequence_running)
         self.shape_type_combo.setEnabled(not sequence_running)
         self.shape_size_spinbox.setEnabled(not sequence_running)
@@ -543,20 +653,16 @@ class MainWindow(QMainWindow):
         self.total_duration_spinbox.setEnabled(not sequence_running)
         self.pattern_canvas.setEnabled(not sequence_running)
 
-
     def _setup_ui(self):
+        # ... (unchanged)
         main_widget = QWidget()
         self.setCentralWidget(main_widget)
         main_layout = QHBoxLayout(main_widget)
-
-        # Instantiate PatternCanvas first as other UI elements might depend on it
         self.pattern_canvas = PatternCanvas()
-
-        # Left Panel: Controls
         controls_panel = QWidget()
         controls_layout = QVBoxLayout(controls_panel)
         controls_panel.setMaximumWidth(400)
-
+        
         # Spatial Pattern Editor Controls
         spatial_group = QFrame()
         spatial_group.setFrameShape(QFrame.Shape.StyledPanel)
@@ -641,17 +747,6 @@ class MainWindow(QMainWindow):
         controls_layout.addWidget(temporal_group)
         controls_layout.addSpacerItem(QSpacerItem(20, 20, QSizePolicy.Policy.Minimum, QSizePolicy.Policy.Expanding))
 
-        # Camera Control Panel
-        camera_control_group = QFrame()
-        camera_control_group.setFrameShape(QFrame.Shape.StyledPanel)
-        camera_control_layout = QVBoxLayout(camera_control_group)
-        camera_control_layout.addWidget(QLabel("<b>Camera Control</b>"), alignment=Qt.AlignmentFlag.AlignCenter)
-        self.snap_button = QPushButton("Acquire Background Image")
-        camera_control_layout.addWidget(self.snap_button)
-        self.clear_background_button = QPushButton("Clear Background Image")
-        camera_control_layout.addWidget(self.clear_background_button)
-        controls_layout.addWidget(camera_control_group)
-
         # DMD Control Panel
         dmd_control_group = QFrame()
         dmd_control_group.setFrameShape(QFrame.Shape.StyledPanel)
@@ -696,24 +791,6 @@ class MainWindow(QMainWindow):
         
         self.dmd_thread.start()
 
-    def _setup_camera_thread(self):
-        self.camera_thread = QThread()
-        self.camera_worker = CameraManager()
-        self.camera_worker.moveToThread(self.camera_thread)
-
-        # Connect worker signals to main thread slots
-        self.camera_worker.status_updated.connect(self.update_status_bar)
-        self.camera_worker.error_occurred.connect(self.show_error_message)
-        self.camera_worker.image_acquired.connect(self.on_background_image_acquired)
-        self.camera_worker.camera_initialized.connect(lambda ok: self.snap_button.setEnabled(ok))
-
-        # Connect main thread signals to worker slots
-        self.request_initialize_camera.connect(self.camera_worker.initialize_camera)
-        self.request_snap_image.connect(self.camera_worker.snap_image)
-        self.request_cleanup_camera.connect(self.camera_worker.cleanup_camera)
-        
-        self.camera_thread.start()
-
     def _connect_signals(self):
         # Spatial controls
         self.shape_type_combo.currentTextChanged.connect(self._on_shape_mode_changed)
@@ -729,21 +806,35 @@ class MainWindow(QMainWindow):
         # Initialize canvas shape params based on default UI
         self._on_shape_mode_changed(self.shape_type_combo.currentText()) # Call after pattern_canvas is available
 
-
-        # DMD controls
         self.send_button.clicked.connect(self.on_send_sequence_clicked)
         self.stop_button.clicked.connect(self.on_stop_dmd_clicked)
+        
+    def process_initial_alignment(self):
+        self.status_bar.showMessage("Alignment complete. Setting up live view...")
+        self.pattern_canvas.set_alignment_matrix(self.alignment_matrix)
+        self.request_start_camera.emit()
 
-        # Camera controls
-        self.snap_button.clicked.connect(self.request_snap_image)
-        self.clear_background_button.clicked.connect(lambda: self.pattern_canvas.set_background_image(None))
+    def closeEvent(self, event):
+        self.status_bar.showMessage("Shutting down...")
+        
+        # NEW: Stop camera thread
+        if self.camera_thread.isRunning():
+            self.camera_worker.stop_streaming()
+            self.camera_thread.quit()
+            if not self.camera_thread.wait(2000):
+                self.update_status_bar("Camera thread did not stop gracefully.")
+                self.camera_thread.terminate()
 
-    @pyqtSlot(np.ndarray)
-    def on_background_image_acquired(self, image_array):
-        q_image = self.camera_worker.numpy_to_qimage(image_array)
-        pixmap = QPixmap.fromImage(q_image)
-        self.pattern_canvas.set_background_image(pixmap)
-        self.update_status_bar("Background image updated.")
+        # (Existing DMD cleanup is unchanged)
+        if self.dmd_thread.isRunning():
+            self.request_cleanup_dmd.emit()
+            self.dmd_thread.quit()
+            if not self.dmd_thread.wait(5000):
+                self.update_status_bar("DMD thread did not stop gracefully.")
+                if self.dmd_thread.isRunning():
+                    self.dmd_thread.terminate()
+                    self.dmd_thread.wait()
+        super().closeEvent(event)
 
     def on_pattern_updated(self, pattern_array):
         # Could update some stats here if needed, e.g., number of active pixels
@@ -823,23 +914,14 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.status_bar.showMessage("Shutting down...")
-        
-        # Cleanup Camera Thread
-        if self.camera_thread.isRunning():
-            self.request_cleanup_camera.emit()
-            self.camera_thread.quit()
-            if not self.camera_thread.wait(3000):
-                self.update_status_bar("Camera thread did not stop gracefully.")
-                self.camera_thread.terminate()
-
-        # Cleanup DMD Thread
         if self.dmd_thread.isRunning():
-            self.request_cleanup_dmd.emit()
-            self.dmd_thread.quit()
-            if not self.dmd_thread.wait(3000):
-                self.update_status_bar("DMD thread did not stop gracefully.")
-                self.dmd_thread.terminate()
-
+            self.request_cleanup_dmd.emit() # Request cleanup
+            self.dmd_thread.quit()          # Ask thread to quit
+        if not self.dmd_thread.wait(5000): # Wait up to 5s for thread to finish
+            self.update_status_bar("DMD thread did not stop gracefully. Forcing exit.")
+            if self.dmd_thread.isRunning(): # Check again before terminating
+                self.dmd_thread.terminate() # Force terminate if it doesn't quit
+                self.dmd_thread.wait()      # Wait for termination
         super().closeEvent(event)
 
     def _on_zoom_slider_changed(self, value):
@@ -884,8 +966,19 @@ class MainWindow(QMainWindow):
 
 
 if __name__ == '__main__':
+
     app = QApplication(sys.argv)
-    # app.setStyle("Fusion") 
-    main_win = MainWindow()
+
+    print("STEP 1: Running Camera-DMD alignment process...")
+    print("This will take a few seconds and interact with the hardware...")
+    transform_matrix = get_alignment_transform()
+    if transform_matrix is None:
+        QMessageBox.critical(None, "Fatal Error", "Camera-DMD alignment failed. The application cannot start.")
+        sys.exit(1)
+    print("\nSTEP 2: Alignment successful. Launching main application...")
+
+    time.sleep(1.0)
+
+    main_win = MainWindow(transform_matrix)
     main_win.show()
     sys.exit(app.exec())

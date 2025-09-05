@@ -171,11 +171,11 @@ def get_alignment_transform():
         unique_pattern = cv2.flip(unique_pattern_orig, 1)
 
         try:
-            dmd = PatternOnTheFly(w=DMD_WIDTH, h=DMD_HEIGHT, test=False)
-            print("Projecting pattern...")
-            dmd.DefinePattern(0, exposure=1000000, darktime=0, data=unique_pattern)
-            dmd.SendImageSequence(nPattern=1, nRepeat=3)
-            dmd.StartRunning()
+            with PatternOnTheFly(w=DMD_WIDTH, h=DMD_HEIGHT, test=False) as dmd:
+                print("Projecting pattern...")
+                dmd.DefinePattern(0, exposure=1500000, darktime=0, data=unique_pattern)
+                dmd.SendImageSequence(nPattern=1, nRepeat=1)
+                dmd.StartRunning()
             print("Waiting for DMD projection to stabilize...")
             time.sleep(1)
         except Exception as e:
@@ -256,3 +256,6 @@ def get_alignment_transform():
             return M
         
         else: return None
+
+if __name__ == '__main__':
+    get_alignment_transform()
