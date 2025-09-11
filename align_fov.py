@@ -5,6 +5,7 @@ import numpy as np
 import os
 import time
 import csv
+import serial
 
 # Import the camera controller library we created
 from thorlabs_cam import ThorlabsCameraController
@@ -14,6 +15,10 @@ from pattern_on_the_fly import PatternOnTheFly
 RADIUS = 680
 DMD_WIDTH = 1920
 DMD_HEIGHT = 1080
+
+# --- Arduino Configuration ---
+SERIAL_PORT = 'COM3'
+BAUD_RATE = 9600
 
 # =============================================================================
 #  Your provided circle detection function
@@ -138,10 +143,15 @@ def get_alignment_transform():
     print("Application starting...")
     os.makedirs('./img/alignment', exist_ok=True)
 
+    arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
+
     with ThorlabsCameraController(camera_index=0) as controller:
         
         # --- PHASE 1: Capture initial FOV image ---
         print("\n--- Phase 1: Capturing initial FOV image ---")
+        arduino.write("ON".encode('utf-8') + b'\n')
+        time.sleep(0.5)
+
         captured_image, _ = controller.get_nowait()
         while captured_image is None:
             captured_image, _ = controller.get_nowait()
@@ -184,6 +194,9 @@ def get_alignment_transform():
 
         # --- PHASE 4: Capture the image with the projected pattern ---
         print("\n--- Phase 4: Capturing image with projected triangle ---")
+        arduino.write("OFF".encode('utf-8') + b'\n')
+        time.sleep(0.5)
+
         triangle_image, _ = controller.get_nowait()
         while triangle_image is None:
             triangle_image, _ = controller.get_nowait()
@@ -220,6 +233,8 @@ def get_alignment_transform():
         # Detect vertices from the 'edges' image
         # The returned vertices are in the coordinate system of the 'cropped_fov' image
         local_vertices, _ = detect_vertices_from_edges(edges, cropped_fov, output_path='result_with_vertices.png')
+
+        arduino.close()
         
         if local_vertices:
             # Convert local vertex coordinates back to the full, original image coordinate system
