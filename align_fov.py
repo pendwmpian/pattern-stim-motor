@@ -6,6 +6,7 @@ import os
 import time
 import csv
 import serial
+import math
 
 # Import the camera controller library we created
 from thorlabs_cam import ThorlabsCameraController
@@ -131,6 +132,25 @@ def detect_vertices_from_edges(edges_image, color_image_for_drawing, output_path
         
     return corners, final_lines
 
+def calculate_angle(p1, p2, p3):
+    """Calculates the angle at vertex p2."""
+    a = np.linalg.norm(np.array(p3) - np.array(p2))
+    b = np.linalg.norm(np.array(p1) - np.array(p3))
+    c = np.linalg.norm(np.array(p1) - np.array(p2))
+    # Cosine rule
+    angle = math.acos((a**2 + c**2 - b**2) / (2 * a * c))
+    return math.degrees(angle)
+
+def get_vertices_with_angles(vertices):
+    """
+    Calculates the angle for each vertex in a triangle.
+    Returns a list of tuples: [(vertex, angle), ...]
+    """
+    p1, p2, p3 = vertices
+    angle1 = calculate_angle(p2, p1, p3) # Angle at p1
+    angle2 = calculate_angle(p1, p2, p3) # Angle at p2
+    angle3 = calculate_angle(p1, p3, p2) # Angle at p3
+    return [(p1, angle1), (p2, angle2), (p3, angle3)]
 
 # =============================================================================
 #  Main Program Logic
@@ -254,13 +274,21 @@ def get_alignment_transform():
                 reader = csv.reader(f); next(reader)
                 for row in reader: ideal_vertices.append([int(row[1]), int(row[2])])
 
-            # Sort both sets of vertices to ensure correct matching for the transform
-            ideal_vertices.sort(key=lambda p: p[1])
-            full_image_vertices.sort(key=lambda p: p[1])
+            ideal_vertices_with_angles = get_vertices_with_angles(ideal_vertices)
+            detected_vertices_with_angles = get_vertices_with_angles(full_image_vertices)
+            
+            ideal_vertices_with_angles.sort(key=lambda item: item[1])
+            detected_vertices_with_angles.sort(key=lambda item: item[1])
+            
+            sorted_ideal_vertices = [item[0] for item in ideal_vertices_with_angles]
+            sorted_detected_vertices = [item[0] for item in detected_vertices_with_angles]
 
-            # Calculate the Affine Transformation Matrix
-            pts_ideal = np.float32(ideal_vertices)
-            pts_detected = np.float32(full_image_vertices)
+            print("\n--- Vertex Matching by Angle ---")
+            for i in range(3):
+                print(f"Match {i+1}: Ideal {sorted_ideal_vertices[i]} <--> Detected {sorted_detected_vertices[i]}")
+
+            pts_ideal = np.float32(sorted_ideal_vertices)
+            pts_detected = np.float32(sorted_detected_vertices)
             M = cv2.getAffineTransform(pts_ideal, pts_detected)
 
             print("\n--- SUCCESS: AFFINE TRANSFORMATION MATRIX (DMD -> CAMERA) ---")

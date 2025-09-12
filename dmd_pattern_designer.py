@@ -167,9 +167,9 @@ class PatternCanvas(QGraphicsView):
                 # OpenCV: [m11, m12, dx], [m21, m22, dy]
                 # QTransform constructor takes row-major: m11, m21, m12, m22, dx, dy
                 m = inverse_matrix
-                self.inverse_transform = QTransform(m[0,0], m[1,0], 0,  # col 1
-                                                    m[0,1], m[1,1], 0,  # col 2
-                                                    m[0,2], m[1,2], 1) # col 3
+                self.inverse_transform = QTransform(-m[0,0], m[1,0], 0,  # col 1
+                                                    -m[0,1], m[1,1], 0,  # col 2
+                                                    -m[0,2] + DMD_WIDTH, m[1,2], 1) # col 3
                 self.background_pixmap_item.setTransform(self.inverse_transform)
                 print("Canvas received and set inverse transform.")
             except Exception as e:
