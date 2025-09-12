@@ -124,6 +124,8 @@ class PatternCanvas(QGraphicsView):
         self.inverse_transform = None
         # --- END NEW ---
 
+        self.semi_transparent_white = QColor(255, 255, 255, 128) # 50% opacity
+
         self.current_shape_mode = "Square"
         self.current_shape_size = DEFAULT_REGION_SIZE
         self.show_grid = False
@@ -268,7 +270,7 @@ class PatternCanvas(QGraphicsView):
                             
                             # Add a 1x1 QGraphicsRectItem for this pixel
                             pixel_rect = QGraphicsRectItem(float(c_idx), float(r_idx), 1.0, 1.0)
-                            pixel_rect.setBrush(Qt.GlobalColor.white)
+                            pixel_rect.setBrush(self.semi_transparent_white)
                             pixel_rect.setPen(QPen(Qt.PenStyle.NoPen)) # No border for individual pixels
                             self.scene.addItem(pixel_rect)
                             self.active_regions_items.append(pixel_rect)
@@ -280,7 +282,7 @@ class PatternCanvas(QGraphicsView):
 
         # Common logic for Square (and if Circle had a single item, which it doesn't anymore)
         if item_to_add: # This will only be true for Squares now
-            item_to_add.setBrush(Qt.GlobalColor.white)
+            item_to_add.setBrush(self.semi_transparent_white)
             item_to_add.setPen(QPen(Qt.PenStyle.NoPen))
             self.scene.addItem(item_to_add)
             self.active_regions_items.append(item_to_add)
