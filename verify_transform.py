@@ -27,9 +27,9 @@ def main():
     # 2. Load the source and destination images
     print("\nLoading images for overlay...")
     # The original pattern you want to transform
-    pattern_image = cv2.imread('unique_pattern.png') 
+    pattern_image = cv2.imread('./unique_pattern/unique_pattern.png') 
     # The image the pattern was projected onto
-    captured_image = cv2.imread('captured_with_triangle.png')
+    captured_image = cv2.imread('./img/align_fov/captured_with_triangle.png')
 
     if pattern_image is None or captured_image is None:
         print("ERROR: Could not load 'unique_pattern.png' or 'captured_with_triangle.png'.")
@@ -41,7 +41,7 @@ def main():
     transformed_pattern = cv2.warpAffine(pattern_image, M, (w, h))
     
     # Save the transformed pattern for inspection
-    cv2.imwrite('transformed_pattern.png', transformed_pattern)
+    cv2.imwrite('./img/align_fov/transformed_pattern.png', transformed_pattern)
     print("Saved the warped pattern as 'transformed_pattern.png'")
 
     # 4. Blend the captured image and the transformed pattern
@@ -55,7 +55,7 @@ def main():
     print("Successfully created the overlay image.")
 
     # 5. Save and display the final result
-    cv2.imwrite('verification_overlay.png', overlay_image)
+    cv2.imwrite('./img/align_fov/verification_overlay.png', overlay_image)
     print("Saved the final result as 'verification_overlay.png'")
 
     cv2.imshow('Verification Overlay', overlay_image)

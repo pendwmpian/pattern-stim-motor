@@ -194,3 +194,4 @@ cython_debug/
 .cursorindexingignore
 
 img/
+unique_pattern/

@@ -162,6 +162,7 @@ def get_alignment_transform():
     """
     print("Application starting...")
     os.makedirs('./img/alignment', exist_ok=True)
+    os.makedirs('./img/align_fov', exist_ok=True)
 
     arduino = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
 
@@ -193,7 +194,7 @@ def get_alignment_transform():
         
         # --- PHASE 3: Project the triangle pattern using the DMD ---
         print("\n--- Phase 3: Projecting triangle pattern via DMD ---")
-        unique_pattern_orig = cv2.imread('unique_pattern.png', cv2.IMREAD_GRAYSCALE)
+        unique_pattern_orig = cv2.imread('./unique_pattern/unique_pattern.png', cv2.IMREAD_GRAYSCALE)
         if unique_pattern_orig is None:
             print("ERROR: Could not load 'unique_pattern.png'.")
             return
@@ -227,7 +228,7 @@ def get_alignment_transform():
             triangle_image_bgr = cv2.cvtColor(triangle_image, cv2.COLOR_RGB2BGR)
         else: # Mono
             triangle_image_bgr = cv2.cvtColor(triangle_image, cv2.COLOR_GRAY2BGR)
-        cv2.imwrite("captured_with_triangle.png", triangle_image_bgr)
+        cv2.imwrite("./img/align_fov/captured_with_triangle.png", triangle_image_bgr)
 
         # --- PHASE 5: Crop and Process Triangle Image ---
         print("\n--- Phase 5: Cropping and processing for triangle edges ---")
@@ -244,7 +245,7 @@ def get_alignment_transform():
         
         # Perform Canny edge detection
         edges = cv2.Canny(blue_filtered, 1000, 1000, apertureSize=3)
-        cv2.imwrite("debug_triangle_edges.png", edges)
+        cv2.imwrite("./img/align_fov/debug_triangle_edges.png", edges)
         print("Saved the detected triangle edges as 'debug_triangle_edges.png'")
 
         # --- PHASE 6: Find Vertices and Calculate Transform ---
@@ -252,7 +253,7 @@ def get_alignment_transform():
         
         # Detect vertices from the 'edges' image
         # The returned vertices are in the coordinate system of the 'cropped_fov' image
-        local_vertices, _ = detect_vertices_from_edges(edges, cropped_fov, output_path='result_with_vertices.png')
+        local_vertices, _ = detect_vertices_from_edges(edges, cropped_fov, output_path='./img/align_fov/result_with_vertices.png')
 
         arduino.close()
         
@@ -270,7 +271,7 @@ def get_alignment_transform():
 
             # Load ideal vertices from CSV
             ideal_vertices = []
-            with open('triangle_vertices.csv', 'r') as f:
+            with open('./unique_pattern/triangle_vertices.csv', 'r') as f:
                 reader = csv.reader(f); next(reader)
                 for row in reader: ideal_vertices.append([int(row[1]), int(row[2])])
 

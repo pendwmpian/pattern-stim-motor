@@ -1,6 +1,7 @@
 import numpy as np
 import cv2
 import csv
+import os
 
 DMD_WIDTH = 1920
 DMD_HEIGHT = 1080
@@ -46,7 +47,7 @@ def generate_triangle_pattern(width, height, triangle_width, line_width):
 
     return image, vertices
 
-def save_vertices_to_csv(vertices, filename="triangle_vertices.csv"):
+def save_vertices_to_csv(vertices, filename="./unique_pattern/triangle_vertices.csv"):
     """
     Saves the vertex coordinates to a CSV file.
 
@@ -69,6 +70,7 @@ def save_vertices_to_csv(vertices, filename="triangle_vertices.csv"):
 
 if __name__ == '__main__':
     pattern_image, vertex_coords = generate_triangle_pattern(DMD_WIDTH, DMD_HEIGHT, TRIANGLE_WIDTH, LINE_WIDTH)
-    cv2.imwrite('unique_pattern.png', pattern_image)
+    os.makedirs('./unique_pattern', exist_ok=True)
+    cv2.imwrite('./unique_pattern/unique_pattern.png', pattern_image)
     save_vertices_to_csv(vertex_coords)
     print("Generated 'unique_pattern.png' with a non-equilateral triangle.")
