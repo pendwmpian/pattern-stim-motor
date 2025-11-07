@@ -255,6 +255,7 @@ def get_alignment_transform():
         # The returned vertices are in the coordinate system of the 'cropped_fov' image
         local_vertices, _ = detect_vertices_from_edges(edges, cropped_fov, output_path='./img/align_fov/result_with_vertices.png')
 
+        arduino.write("ON".encode('utf-8') + b'\n')
         arduino.close()
         
         if local_vertices:
