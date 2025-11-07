@@ -64,7 +64,7 @@ def create_sample_canvas(canvas_size):
     return canvas
 
 
-def transform_and_project(canvas, M_cam_to_dmd, top_left_x, top_left_y):
+def transform2DMD(canvas, M_cam_to_dmd, top_left_x, top_left_y):
     """
     Creates a 1440x1080 camera frame, "pastes" the canvas onto it,
     transforms this frame to DMD coordinates, saves it as a PNG,
@@ -130,17 +130,7 @@ def transform_and_project(canvas, M_cam_to_dmd, top_left_x, top_left_y):
     pattern_array_u8 = cv2.flip(pattern_array_u8, 1)
     pattern_array_binary = (pattern_array_u8 > 0).astype(np.uint8)
     
-    with PatternOnTheFly(w=DMD_WIDTH, h=DMD_HEIGHT, test=False) as dmd:
-        print("DMD opened. Projecting pattern...")
-        # Use the binary (0/1) array here
-        dmd.DefinePattern(0, exposure=1500000, darktime=0, data=pattern_array_binary)
-        # 3. Changed nRepeat to 0
-        dmd.SendImageSequence(nPattern=1, nRepeat=0)
-        dmd.StartRunning()
-        print("Pattern is running. Press Enter to stop...")
-        input() # Wait for user to press Enter
-        # dmd.StopRunning() # Assuming the 'with' statement handles cleanup
-        print("Pattern stopped.")
+    return pattern_array_binary
 
 
 def create_and_project_pattern():
@@ -158,8 +148,20 @@ def create_and_project_pattern():
     
     canvas_size = int(np.ceil(canvas_diameter))
     canvas = create_sample_canvas(canvas_size)
-    
-    transform_and_project(canvas, M_cam_to_dmd, tx, ty)
+
+    pattern_array_binary = transform2DMD(canvas, M_cam_to_dmd, tx, ty)
+
+    with PatternOnTheFly(w=DMD_WIDTH, h=DMD_HEIGHT, test=False) as dmd:
+        print("DMD opened. Projecting pattern...")
+        # Use the binary (0/1) array here
+        dmd.DefinePattern(0, exposure=1500000, darktime=0, data=pattern_array_binary)
+        # 3. Changed nRepeat to 0
+        dmd.SendImageSequence(nPattern=1, nRepeat=0)
+        dmd.StartRunning()
+        print("Pattern is running. Press Enter to stop...")
+        input() # Wait for user to press Enter
+        # dmd.StopRunning() # Assuming the 'with' statement handles cleanup
+        print("Pattern stopped.")
 
 
 if __name__ == "__main__":
