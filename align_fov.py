@@ -298,7 +298,7 @@ def get_alignment_transform():
             print(M)
             print("----------------------------------------------------------")
 
-            return M
+            return M, center_x - RADIUS, center_y - RADIUS, detected_radius
         
         else: return None
 

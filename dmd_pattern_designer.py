@@ -62,7 +62,7 @@ class AlignmentWorker(QObject):
     def run_alignment(self):
         self.status_update.emit("Starting alignment... This may take several seconds.")
         try:
-            transform_matrix = get_alignment_transform()
+            transform_matrix, _, _, _ = get_alignment_transform()
             self.transform_ready.emit(transform_matrix)
         except Exception as e:
             self.status_update.emit(f"Alignment failed: {e}")
@@ -973,7 +973,7 @@ if __name__ == '__main__':
 
     print("STEP 1: Running Camera-DMD alignment process...")
     print("This will take a few seconds and interact with the hardware...")
-    transform_matrix = get_alignment_transform()
+    transform_matrix, _, _, _ = get_alignment_transform()
     if transform_matrix is None:
         QMessageBox.critical(None, "Fatal Error", "Camera-DMD alignment failed. The application cannot start.")
         sys.exit(1)
