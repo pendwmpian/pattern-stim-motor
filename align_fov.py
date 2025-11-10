@@ -200,6 +200,7 @@ def get_alignment_transform():
             return
         
         unique_pattern = cv2.flip(unique_pattern_orig, 1)
+        unique_pattern = (unique_pattern > 0).astype(np.uint8)
 
         try:
             with PatternOnTheFly(w=DMD_WIDTH, h=DMD_HEIGHT, test=False) as dmd:
