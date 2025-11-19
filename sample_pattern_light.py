@@ -41,31 +41,10 @@ EXPOSURE_TIME_US = EXPOSURE_TIME_MS * 1000
 Y_STEPS_ON_TURN = 5 
 
 
-def run_zigzag_sequence():
-    """
-    Initializes the DMD coordinator, generates a 100-frame "zig-zag walking"
-    pattern sequence, and projects it.
-    """
-    
-    # --- 1. Initialize Coordinator ---
-    coordinator = DMDCoordinator()
-    
-    if not coordinator.is_valid:
-        print("DMD Coordinator setup failed. Exiting.")
-        return
-        
-    canvas_size = coordinator.get_canvas_size()
-    if canvas_size == 0:
-        print("Canvas size is 0. Exiting.")
-        return
+def create_zigzag_sequence(canvas_size):
 
-    print(f"\n--- Step 1: Coordinator Valid. Canvas Size: {canvas_size}x{canvas_size} ---")
+    res = []
 
-    # --- 2. Generate Frames ---
-    print(f"--- Step 2: Generating {NUM_FRAMES} frames... ---")
-    
-    binary_frames = []
-    
     # Pre-calculate movement bounds
     max_x = canvas_size - SQUARE_SIZE
     max_y = canvas_size - SQUARE_SIZE
@@ -90,15 +69,8 @@ def run_zigzag_sequence():
         x2 = x1 + SQUARE_SIZE
         y2 = y1 + SQUARE_SIZE
         cv2.rectangle(canvas, (x1, y1), (x2, y2), 255, -1)
-        
-        # 3. Transform the canvas to a DMD binary pattern
-        print(f"Transforming frame {i+1}/{NUM_FRAMES}...")
-        binary_pattern = coordinator.transform2DMD(canvas)
-        
-        if binary_pattern is not None:
-            binary_frames.append(binary_pattern)
-        else:
-            print(f"Warning: Frame {i+1} transformation failed. Skipping.")
+
+        res.append(canvas)
 
         # 4. Update state and position for the *next* frame
         if state == 'move_x':
@@ -129,10 +101,41 @@ def run_zigzag_sequence():
                 current_y = max_y
                 state = 'move_x' # No more room, go back to X
                 print("Warning: Reached bottom of canvas.")
+
+    return res
+
+
+def run_zigzag_sequence():
+    """
+    Initializes the DMD coordinator, generates a 100-frame "zig-zag walking"
+    pattern sequence, and projects it.
+    """
     
-    if not binary_frames:
-        print("No frames were generated. Exiting.")
+    # --- 1. Initialize Coordinator ---
+    coordinator = DMDCoordinator()
+    
+    if not coordinator.is_valid:
+        print("DMD Coordinator setup failed. Exiting.")
         return
+        
+    canvas_size = coordinator.get_canvas_size()
+    if canvas_size == 0:
+        print("Canvas size is 0. Exiting.")
+        return
+
+    print(f"\n--- Step 1: Coordinator Valid. Canvas Size: {canvas_size}x{canvas_size} ---")
+
+    # --- 2. Generate Frames ---
+    print(f"--- Step 2: Generating {NUM_FRAMES} frames... ---")
+    
+    # functions for creating frames
+    canvas_seq= create_zigzag_sequence(canvas_size) 
+    binary_frames = []
+
+    for canvas in canvas_seq:
+        print(f"Transforming frame {i+1}/{NUM_FRAMES}...")
+        binary_pattern = coordinator.transform2DMD(canvas)
+        binary_frames.append(binary_pattern)
         
     print(f"\n--- Step 3: Projecting {len(binary_frames)}-frame sequence ---")
     
