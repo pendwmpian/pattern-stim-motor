@@ -104,6 +104,8 @@ def create_zigzag_sequence(canvas_size):
 
     return res
 
+def all_exposure_sequence(canvas_size):
+    return [np.ones((canvas_size, canvas_size), dtype=np.uint8)] * NUM_FRAMES
 
 def run_zigzag_sequence():
     """
@@ -129,10 +131,10 @@ def run_zigzag_sequence():
     print(f"--- Step 2: Generating {NUM_FRAMES} frames... ---")
     
     # functions for creating frames
-    canvas_seq= create_zigzag_sequence(canvas_size) 
+    canvas_seq= all_exposure_sequence(canvas_size) 
     binary_frames = []
 
-    for canvas in canvas_seq:
+    for i, canvas in enumerate(canvas_seq):
         print(f"Transforming frame {i+1}/{NUM_FRAMES}...")
         binary_pattern = coordinator.transform2DMD(canvas)
         binary_frames.append(binary_pattern)
