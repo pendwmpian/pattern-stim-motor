@@ -1,10 +1,35 @@
 import numpy as np
 import cv2
 import os
+import time
+import sys
+import skvideo.io
 
 from dmd_coordinator import DMDCoordinator
 from pattern_on_the_fly import PatternOnTheFly
 
+import neoapi
+import datetime
+
+camera = neoapi.Cam()
+camera.Connect()
+camera.SetImageBufferCount(3000)       # set the size of the buffer queue to 50
+camera.SetImageBufferCycleCount(3000)  # and the cycle count as well
+
+CAMERA_WIDTH = 480
+CAMERA_HEIGHT = 480
+
+if camera.IsConnected():
+    camera.f.TriggerMode.value = neoapi.TriggerMode_Off
+    camera.f.AcquisitionFrameRateEnable = True
+    camera.f.AcquisitionFrameRate = 1000
+
+    camera.f.ExposureTime.Set(900)
+    camera.f.Gain.Set(5.5)
+    camera.f.Width.Set(CAMERA_WIDTH)
+    camera.f.Height.Set(CAMERA_HEIGHT)
+    camera.f.OffsetX.Set(640 - CAMERA_WIDTH // 2)
+    camera.f.OffsetY.Set(512 - CAMERA_HEIGHT // 2)
 
 SQUARE_SIZE = 200
 STEP_SIZE = 30    # Pixels to move per frame
@@ -115,25 +140,50 @@ def run_zigzag_sequence():
         with PatternOnTheFly(w=coordinator.DMD_WIDTH, h=coordinator.DMD_HEIGHT, test=False) as dmd:
             
             # Define all patterns in the sequence
+            for i in range(10):
+                dmd.DefinePattern(i, exposure=2000000, darktime=0, data=np.zeros((1080, 1920), dtype=np.int8))
             for i, frame_data in enumerate(binary_frames):
                 dmd.DefinePattern(
-                    i, 
-                    exposure=EXPOSURE_TIME_US, 
-                    darktime=0, 
+                    i+10, 
+                    exposure=EXPOSURE_TIME_US // 2, 
+                    darktime=EXPOSURE_TIME_US // 2, 
                     data=frame_data
                 )
             
             print(f"Defined {len(binary_frames)} patterns.")
             
-            dmd.SendImageSequence(nPattern=len(binary_frames), nRepeat=0) # nRepeat=0 for infinite loop
+            dmd.SendImageSequence(nPattern=len(binary_frames)+5, nRepeat=20) # nRepeat=0 for infinite loop
             dmd.StartRunning()
             
-            print("Pattern sequence is running. Press Enter to stop...")
-            input() 
-            print("Pattern stopped.")
+            t_start = time.time()
             
     except Exception as e:
         print(f"\nAn error occurred during DMD projection: {e}")
+
+    for i in range(20):
+        img = []
+        print ("Session " + str(i))
+        while time.time() < t_start + i * 22 + 19.5: pass
+        for i in range(3000):
+            try:
+                img.append(camera.GetImage()) 
+            except (neoapi.NoImageBufferException) as exc:
+                print(sys.exc_info()[0])
+                print("NoImageBufferException: ", exc)
+
+        path = "./img/" + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
+        os.makedirs(path, exist_ok=True)
+        output_video = path + "/3000.mp4"
+        output_parameters = {
+            '-r': '1000',          # Output FPS
+            '-c:v': 'libx264',     # H.264 codec
+            '-crf': '17',           # Lossless mode
+            '-preset': 'veryfast', # Best compression
+            '-pix_fmt': 'gray'  # Standard pixel format (compatible with most players)
+        }
+        with skvideo.io.FFmpegWriter(output_video, outputdict=output_parameters) as writer:
+            for i in range(3000):
+                writer.writeFrame(img[i].GetNPArray())	
 
 if __name__ == "__main__":
     run_zigzag_sequence()
