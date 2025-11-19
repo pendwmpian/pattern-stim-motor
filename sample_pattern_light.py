@@ -13,7 +13,7 @@ import datetime
 
 camera = neoapi.Cam()
 camera.Connect()
-camera.SetImageBufferCount(3000)       # set the size of the buffer queue to 50
+camera.SetImageBufferCount(4000)       # set the size of the buffer queue to 50
 camera.SetImageBufferCycleCount(3000)  # and the cycle count as well
 
 CAMERA_WIDTH = 480
@@ -40,6 +40,7 @@ EXPOSURE_TIME_US = EXPOSURE_TIME_MS * 1000
 # "a few steps" = 1 frame for this logic
 Y_STEPS_ON_TURN = 5 
 
+np.random.seed(42)
 
 def create_zigzag_sequence(canvas_size):
 
@@ -105,7 +106,34 @@ def create_zigzag_sequence(canvas_size):
     return res
 
 def all_exposure_sequence(canvas_size):
-    return [np.ones((canvas_size, canvas_size), dtype=np.uint8)] * NUM_FRAMES
+    return [np.ones((canvas_size, canvas_size), dtype=np.uint8), np.zeros((canvas_size, canvas_size), dtype=np.uint8)] * (NUM_FRAMES // 2)
+
+def generate_pixel_noise(canvas_size, density=0.15):
+
+    frames = np.random.choice(
+        [0, 1],
+        size=(NUM_FRAMES, canvas_size, canvas_size),
+        p=[1 - density, density]
+    )
+    return frames.astype(np.uint8)
+
+def generate_block_noise(canvas_size, block_size=150, density=0.15):
+
+    grid_rows = (canvas_size + block_size - 1) // block_size
+    grid_cols = (canvas_size + block_size - 1) // block_size
+    
+    small_frames = np.random.choice(
+        [0, 1],
+        size=(NUM_FRAMES, grid_rows, grid_cols),
+        p=[1 - density, density]
+    )
+    
+    expanded = small_frames.repeat(block_size, axis=2)
+    expanded = expanded.repeat(block_size, axis=1)
+    
+    final_frames = expanded[:, :canvas_size, :canvas_size]
+    
+    return final_frames.astype(np.uint8)
 
 def run_zigzag_sequence():
     """
@@ -131,7 +159,9 @@ def run_zigzag_sequence():
     print(f"--- Step 2: Generating {NUM_FRAMES} frames... ---")
     
     # functions for creating frames
-    canvas_seq= all_exposure_sequence(canvas_size) 
+    #canvas_seq= all_exposure_sequence(canvas_size) 
+    canvas_seq= generate_pixel_noise(canvas_size) 
+    #canvas_seq= generate_block_noise(canvas_size) 
     binary_frames = []
 
     for i, canvas in enumerate(canvas_seq):
@@ -150,17 +180,19 @@ def run_zigzag_sequence():
             for i, frame_data in enumerate(binary_frames):
                 dmd.DefinePattern(
                     i+10, 
-                    exposure=EXPOSURE_TIME_US // 2, 
-                    darktime=EXPOSURE_TIME_US // 2, 
+                    exposure=EXPOSURE_TIME_US, 
+                    darktime=0,#EXPOSURE_TIME_US // 2, 
                     data=frame_data
                 )
             
             print(f"Defined {len(binary_frames)} patterns.")
             
-            dmd.SendImageSequence(nPattern=len(binary_frames)+5, nRepeat=20) # nRepeat=0 for infinite loop
+            print("Packet Size (DMD): " + str(dmd.CalcSizeOfImageSequence(nPattern=len(binary_frames)+10)))
+            dmd.SendImageSequence(nPattern=len(binary_frames)+10, nRepeat=20) # nRepeat=0 for infinite loop
             dmd.StartRunning()
             
             t_start = time.time()
+            print(t_start)
             
     except Exception as e:
         print(f"\nAn error occurred during DMD projection: {e}")
@@ -168,13 +200,16 @@ def run_zigzag_sequence():
     for i in range(20):
         img = []
         print ("Session " + str(i))
-        while time.time() < t_start + i * 22 + 19.5: pass
+        while time.time() < t_start + i * 22 + 23: pass
+        print(time.time())
         for i in range(3000):
             try:
                 img.append(camera.GetImage()) 
             except (neoapi.NoImageBufferException) as exc:
                 print(sys.exc_info()[0])
                 print("NoImageBufferException: ", exc)
+
+        print(time.time())
 
         path = "./img/" + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
         os.makedirs(path, exist_ok=True)
