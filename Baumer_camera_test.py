@@ -4,6 +4,7 @@ import time
 import cv2
 import os
 import datetime
+import skvideo.io
 
 camera = neoapi.Cam()
 camera.Connect()
@@ -40,5 +41,20 @@ if camera.IsConnected():
 
 path = "./img/" + datetime.datetime.now().strftime('%Y%m%d_%H%M%S')
 os.makedirs(path, exist_ok=True)
-for i in range(3000):
-    cv2.imwrite(path + "/{:0=4}.png".format(i), img[i].GetNPArray())	
+# for i in range(3000):
+#     cv2.imwrite(path + "/{:0=4}.png".format(i), img[i].GetNPArray())	
+
+# for video compression
+
+output_video = path + "/3000.mp4"
+output_parameters = {
+    '-r': '1000',          # Output FPS
+    '-c:v': 'libx264',     # H.264 codec
+    '-crf': '17',           # Lossless mode
+    '-preset': 'veryfast', # Best compression
+    '-pix_fmt': 'gray'  # Standard pixel format (compatible with most players)
+}
+
+with skvideo.io.FFmpegWriter(output_video, outputdict=output_parameters) as writer:
+    for i in range(3000):
+        writer.writeFrame(img[i].GetNPArray())	
